@@ -3,18 +3,18 @@ package com.neatmessage.app
 import android.Manifest
 import android.content.ContentResolver
 import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Bundle
 import android.provider.BaseColumns
 import android.provider.Telephony
+import android.telephony.SmsManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -48,6 +48,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -57,6 +58,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextField
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -152,8 +154,22 @@ private fun NeatMessageApp() {
     var selectedNav by remember { mutableStateOf(0) }
     var searchOpen by remember { mutableStateOf(false) }
     var searchText by remember { mutableStateOf("") }
+    var selectedMessage by remember { mutableStateOf<Message?>(null) }
+    var composerOpen by remember { mutableStateOf(false) }
+    var recipient by remember { mutableStateOf("") }
+    var messageText by remember { mutableStateOf("") }
+    var hasSendPermission by remember { mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.SEND_SMS) == PackageManager.PERMISSION_GRANTED) }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         hasPermission = granted
+    }
+    val sendPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        hasSendPermission = granted
+        if (granted) {
+            sendSms(context, recipient, messageText) {
+                composerOpen = false
+                messageText = ""
+            }
+        }
     }
 
     fun refresh() {
@@ -218,7 +234,7 @@ private fun NeatMessageApp() {
             },
             floatingActionButton = {
                 androidx.compose.material3.FloatingActionButton(
-                    onClick = { openComposer(context, "") }, containerColor = Leaf, contentColor = Color.White, shape = CircleShape
+                    onClick = { composerOpen = true; recipient = ""; messageText = "" }, containerColor = Leaf, contentColor = Color.White, shape = CircleShape
                 ) { Icon(Icons.Outlined.Add, "New message") }
             }
         ) { padding ->
@@ -247,19 +263,49 @@ private fun NeatMessageApp() {
                             message = message,
                             blocked = message.id in blockedIds,
                             onBlock = { blockedIds = if (message.id in blockedIds) blockedIds - message.id else blockedIds + message.id },
-                            onReply = { openComposer(context, message.sender) }
+                            onReply = { composerOpen = true; recipient = message.sender; messageText = "" },
+                            onOpen = { selectedMessage = message }
                         )
                     }
                 }
                 item { Spacer(Modifier.height(70.dp)) }
             }
         }
+        selectedMessage?.let { message ->
+            MessageDetailDialog(message) { selectedMessage = null }
+        }
+        if (composerOpen) {
+            ComposerDialog(
+                recipient = recipient,
+                message = messageText,
+                onRecipientChange = { recipient = it },
+                onMessageChange = { messageText = it },
+                onDismiss = { composerOpen = false },
+                onSend = {
+                    if (recipient.isBlank() || messageText.isBlank()) {
+                        Toast.makeText(context, "Enter a recipient and message", Toast.LENGTH_SHORT).show()
+                    } else if (hasSendPermission) {
+                        sendSms(context, recipient, messageText) {
+                            composerOpen = false
+                            messageText = ""
+                        }
+                    } else {
+                        sendPermissionLauncher.launch(Manifest.permission.SEND_SMS)
+                    }
+                }
+            )
+        }
     }
 }
 
-private fun openComposer(context: Context, sender: String) {
-    val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:${Uri.encode(sender)}"))
-    context.startActivity(Intent.createChooser(intent, "Send SMS"))
+private fun sendSms(context: Context, recipient: String, body: String, onSent: () -> Unit) {
+    try {
+        SmsManager.getDefault().sendTextMessage(recipient.trim(), null, body, null, null)
+        Toast.makeText(context, "Message sent", Toast.LENGTH_SHORT).show()
+        onSent()
+    } catch (error: Exception) {
+        Toast.makeText(context, "Could not send SMS: ${error.message ?: "unknown error"}", Toast.LENGTH_LONG).show()
+    }
 }
 
 @Composable
@@ -327,14 +373,18 @@ private fun EmptyState(searching: Boolean) {
 }
 
 @Composable
-private fun MessageCard(message: Message, blocked: Boolean, onBlock: () -> Unit, onReply: () -> Unit) {
+private fun MessageCard(message: Message, blocked: Boolean, onBlock: () -> Unit, onReply: () -> Unit, onOpen: () -> Unit) {
     val label = when {
         blocked -> "Blocked"
         message.suspicious -> "Needs review"
         else -> "Trusted sender"
     }
     val labelColor = if (blocked || message.suspicious) Coral else Leaf
-    Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
+    Card(
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        modifier = Modifier.clickable(onClick = onOpen)
+    ) {
         Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.Top) {
             Box(Modifier.size(46.dp).clip(CircleShape).background(if (message.suspicious) Color(0xFFF4D3C5) else Color(0xFFBFDCC8)), contentAlignment = Alignment.Center) {
                 Text(message.sender.firstOrNull()?.uppercase() ?: "?", color = Ink, fontWeight = FontWeight.Bold)
@@ -360,4 +410,55 @@ private fun MessageCard(message: Message, blocked: Boolean, onBlock: () -> Unit,
             }
         }
     }
+}
+
+@Composable
+private fun MessageDetailDialog(message: Message, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(message.sender, color = Ink, fontWeight = FontWeight.Bold) },
+        text = {
+            Column {
+                Text(DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(message.date)), color = Muted, fontSize = 12.sp)
+                Spacer(Modifier.height(12.dp))
+                Text(message.body, color = Ink, fontSize = 16.sp)
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close", color = Leaf) } }
+    )
+}
+
+@Composable
+private fun ComposerDialog(
+    recipient: String,
+    message: String,
+    onRecipientChange: (String) -> Unit,
+    onMessageChange: (String) -> Unit,
+    onDismiss: () -> Unit,
+    onSend: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("New message", color = Ink, fontWeight = FontWeight.Bold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                TextField(
+                    value = recipient,
+                    onValueChange = onRecipientChange,
+                    label = { Text("Phone number or sender") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                TextField(
+                    value = message,
+                    onValueChange = onMessageChange,
+                    label = { Text("Message") },
+                    minLines = 4,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = Muted) } },
+        confirmButton = { Button(onClick = onSend, colors = ButtonDefaults.buttonColors(containerColor = Leaf)) { Text("Send") } }
+    )
 }
